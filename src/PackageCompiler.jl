@@ -226,14 +226,17 @@ function ensurecompiled(project, packages, sysimage)
     return
 end
 
-function run_precompilation_script(project::String, sysimg::String, precompile_file::Union{String, Nothing}, precompile_dir::String)
+function run_precompilation_script(project::String, sysimg::String, precompile_file::Union{String, Nothing}, precompile_dir::String; extras_project::Union{String,Nothing}=nothing)
     tracefile, io = mktemp(precompile_dir; cleanup=false)
     close(io)
     arg = precompile_file === nothing ? `-e ''` : `$precompile_file`
     cmd = `$(get_julia_cmd()) --sysimage=$(sysimg) --compile=all --trace-compile=$tracefile $arg`
     # --project is not propagated well with Distributed, so use environment
     splitter = Sys.iswindows() ? ';' : ':'
-    cmd = addenv(cmd, "JULIA_LOAD_PATH" => "$project$(splitter)@stdlib")
+    envs = [project]
+    !isnothing(extras_project) && push!(envs, extras_project)
+    push!(envs, "@stdlib")
+    cmd = addenv(cmd, "JULIA_LOAD_PATH" => join(envs, splitter))
     precompile_file === nothing || @info "PackageCompiler: Executing $(abspath(precompile_file)) => $(tracefile)"
     run(cmd)  # `Run` this command so that we'll display stdout from the user's script.
     precompile_file === nothing || @info "PackageCompiler: Done"
@@ -250,13 +253,14 @@ function create_sysimg_object_file(object_file::String,
                             cpu_target::String,
                             script::Union{Nothing, String},
                             sysimage_build_args::Cmd,
-                            extra_precompiles::String)
+                            extra_precompiles::String,
+                            extras_project::Union{String,Nothing}=nothing)
     # Handle precompilation
     precompile_files = String[]
     @debug "running precompilation execution script..."
     precompile_dir = mktempdir(; prefix="jl_packagecompiler_", cleanup=false)
     for file in (isempty(precompile_execution_file) ? (nothing,) : precompile_execution_file)
-        tracefile = run_precompilation_script(project, base_sysimage, file, precompile_dir)
+        tracefile = run_precompilation_script(project, base_sysimage, file, precompile_dir; extras_project)
         push!(precompile_files, tracefile)
     end
     append!(precompile_files, abspath.(precompile_statements_file))
@@ -423,6 +427,7 @@ function create_sysimage(packages::Union{Nothing, Symbol, Vector{String}, Vector
                          soname=nothing,
                          compat_level::String="major",
                          extra_precompiles::String = "",
+                         extras_project::Union{String,Nothing}=nothing
                          )
 
     if filter_stdlibs && incremental
@@ -512,7 +517,8 @@ function create_sysimage(packages::Union{Nothing, Symbol, Vector{String}, Vector
                             cpu_target,
                             script,
                             sysimage_build_args,
-                            extra_precompiles)
+                            extra_precompiles,
+                            extras_project)
     object_files = [object_file]
     if julia_init_c_file !== nothing
         push!(object_files, compile_c_init_julia(julia_init_c_file, basename(sysimage_path)))
@@ -685,7 +691,9 @@ function create_app(package_dir::String,
                     cpu_target::String=default_app_cpu_target(),
                     include_lazy_artifacts::Bool=false,
                     sysimage_build_args::Cmd=``,
-                    include_transitive_dependencies::Bool=true)
+                    include_transitive_dependencies::Bool=true,
+                    extras_project::Union{String,Nothing}=nothing
+                    )
     warn_official()
 
     ctx = create_pkg_context(package_dir)
@@ -723,7 +731,7 @@ function create_app(package_dir::String,
                     cpu_target,
                     sysimage_build_args,
                     include_transitive_dependencies,
-                    extra_precompiles = join(precompiles, "\n"))
+                    extra_precompiles = join(precompiles, "\n"), extras_project)
 
     for (app_name, julia_main) in executables
         create_executable_from_sysimg(joinpath(app_dir, "bin", app_name), c_driver_program, string(package_name, ".", julia_main))
